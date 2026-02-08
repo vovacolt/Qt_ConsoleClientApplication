@@ -200,18 +200,20 @@ QJsonObject DeviceEmulator::generateLog()
     if(len == 0)
     {
         msg = "Short log info"; // < 50
+        json["severity"] = "INFO";
     }
     else if(len == 1)
     {
         msg = "Medium log info message with some details about system state..."; // 50-200
+        json["severity"] = "WARNING";
     }
     else
     {
         msg = QString("Long log error details...").repeated(10); // 200+
+        json["severity"] = "ERROR";
     }
 
     json["message"] = msg;
-    json["severity"] = "INFO";
 
     return json;
 }
