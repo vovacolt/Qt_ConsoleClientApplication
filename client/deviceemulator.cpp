@@ -160,6 +160,12 @@ void DeviceEmulator::sendData()
 
     m_socket->write(packJson(payload));
 
+    // Logs the message being sent
+    QJsonDocument doc(payload);
+    QByteArray byteArray = doc.toJson();
+    QString jsonString = QString(byteArray);
+    std::cout << "Sent message: " << std::endl << jsonString.toStdString() << std::endl;
+
     // Random delay 10ms - 100ms
     int delay = QRandomGenerator::global()->bounded(10, 101);
     m_dataTimer->start(delay);
