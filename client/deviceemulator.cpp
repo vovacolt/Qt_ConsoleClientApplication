@@ -3,6 +3,7 @@
 
 #include <QRandomGenerator>
 #include <QCoreApplication>
+#include <QJsonParseError>
 
 #include "../common/networkhelpers.h"
 
@@ -36,6 +37,8 @@ void DeviceEmulator::connectToServer()
     if (m_socket->state() == QAbstractSocket::UnconnectedState)
     {
         std::cout << "Connecting to localhost..." << std::endl;
+
+        m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
         m_socket->connectToHost("localhost", SERVER_PORT);
     }
 }
@@ -44,6 +47,7 @@ void DeviceEmulator::onConnected()
 {
     std::cout << "Connected to Server!" << std::endl;
     m_reconnectTimer->stop();
+    m_buffer.clear();
 }
 
 void DeviceEmulator::onDisconnected()
@@ -52,6 +56,7 @@ void DeviceEmulator::onDisconnected()
     m_isStreaming = false;
     m_dataTimer->stop();
     m_reconnectTimer->start();
+    m_buffer.clear();
 }
 
 void DeviceEmulator::onError(QAbstractSocket::SocketError socketError)
@@ -78,39 +83,50 @@ void DeviceEmulator::onReadyRead()
         return;
     }
 
-    QDataStream in(socket);
-    in.setVersion(QDataStream::Qt_6_5);
+    m_buffer.append(socket->readAll());
 
     while (true)
     {
-        if (socket->bytesAvailable() < sizeof(quint32))
+        if (m_buffer.size() < (qsizetype)sizeof(quint32))
         {
             break;
         }
 
-        // Read the packet size, but don't move the position until we're sure the data arrived
-        QByteArray header = socket->peek(sizeof(quint32));
-        QDataStream headerStream(header);
-        headerStream.setVersion(QDataStream::Qt_6_5);
+        QDataStream in(m_buffer);
+        in.setVersion(QDataStream::Qt_6_5);
+
         quint32 blockSize;
-        headerStream >> blockSize;
+        in >> blockSize;
 
-        // Waiting for more data
-        if (socket->bytesAvailable() < (quint32)sizeof(quint32) + blockSize)
+        if (blockSize > MAX_PACKET_SIZE)
+        {
+            std::cerr << "Error: Packet too large (" << blockSize << "). Disconnecting." << std::endl;
+            socket->disconnectFromHost();
+            return;
+        }
+
+        // Wait for full packet
+        if (m_buffer.size() < (qsizetype)(sizeof(quint32) + blockSize))
         {
             break;
         }
-        // Data is ready
 
-        // Skipping the size header
-        quint32 dummy;
-        in >> dummy;
+        // Remove header
+        m_buffer.remove(0, sizeof(quint32));
 
-        QByteArray data;
-        data.resize(blockSize);
-        in.readRawData(data.data(), blockSize);
+        // Extract data
+        QByteArray data = m_buffer.left(blockSize);
+        m_buffer.remove(0, blockSize);
 
-        QJsonDocument doc = QJsonDocument::fromJson(data.data());
+        // Parse JSON
+        QJsonParseError parseError;
+        QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+
+        if (parseError.error != QJsonParseError::NoError)
+        {
+            std::cerr << "JSON Parse Error: " << parseError.errorString().toStdString() << std::endl;
+            continue;
+        }
 
         if (doc.isObject())
         {
@@ -122,21 +138,28 @@ void DeviceEmulator::onReadyRead()
 void DeviceEmulator::processCommand(const QJsonObject& json)
 {
     QString type = json[KEY_TYPE].toString();
-    std::cout << "Received: " << type.toStdString() << std::endl;
 
     if (type == PacketType::HANDSHAKE)
     {
-        std::cout << "Server confirmed connection." << std::endl;
+        std::cout << "Server handshake received." << std::endl;
     }
     else if (type == PacketType::COMMAND_START)
     {
-        m_isStreaming = true;
-        sendData();
+        if (!m_isStreaming)
+        {
+            std::cout << ">>> COMMAND START RECEIVED <<<" << std::endl;
+            m_isStreaming = true;
+            sendData();
+        }
     }
     else if (type == PacketType::COMMAND_STOP)
     {
-        m_isStreaming = false;
-        m_dataTimer->stop();
+        if (m_isStreaming)
+        {
+            std::cout << ">>> COMMAND STOP RECEIVED <<<" << std::endl;
+            m_isStreaming = false;
+            m_dataTimer->stop();
+        }
     }
 }
 
@@ -147,7 +170,13 @@ void DeviceEmulator::sendData()
         return;
     }
 
-    // Selecting a data type
+    if (m_socket->bytesToWrite() > MAX_PENDING_WRITE_BYTES)
+    {
+        std::cout << "WARNING: Network congested. Skipping frame." << std::endl;
+        m_dataTimer->start(100);
+        return;
+    }
+
     int roll = QRandomGenerator::global()->bounded(3);
     QJsonObject payload;
 
@@ -160,11 +189,7 @@ void DeviceEmulator::sendData()
 
     m_socket->write(packJson(payload));
 
-    // Logs the message being sent
-    QJsonDocument doc(payload);
-    QByteArray byteArray = doc.toJson();
-    QString jsonString = QString(byteArray);
-    std::cout << "Sent message: " << std::endl << jsonString.toStdString() << std::endl;
+    std::cout << "Sent message: " << std::endl << payload[KEY_TYPE].toString().toStdString() << std::endl;
 
     // Random delay 10ms - 100ms
     int delay = QRandomGenerator::global()->bounded(10, 101);

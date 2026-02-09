@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QByteArray>
 
 class DeviceEmulator : public QObject
 {
@@ -31,6 +32,7 @@ private:
     QTimer* m_reconnectTimer;
     QTimer* m_dataTimer;
 
+    QByteArray m_buffer;
     QJsonObject generateMetrics();
     QJsonObject generateStatus();
     QJsonObject generateLog();
